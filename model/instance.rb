@@ -25,6 +25,18 @@ module Plugin::Worldon
         end
       end
 
+      def datasource_slug_inv(sym)
+        s = sym.to_s
+        r = %r!\Aworldon-(.*)-(local(?:-media)?|federated(?:-media)?)\z!
+        m = r.match s
+        return nil if !m
+
+        domain = m[1]
+        type = m[2].gsub("-", "_").to_sym
+
+        return [domain, type]
+      end
+
       def add_datasources(domain)
         Plugin[:worldon].filter_extract_datasources do |dss|
           datasources = {

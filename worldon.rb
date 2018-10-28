@@ -43,6 +43,81 @@ Plugin.create(:worldon) do
     [datasources.merge(dss)]
   end
 
+  on_extract_load_more_datasource do |source, oldest|
+    notice "worldon: load more #{source} from #{oldest&.uri} #{oldest.inspect}"
+    s = source.to_s
+    next unless s.start_with?("worldon-") # 「すべてのトゥート」は遡れないことにする
+    next unless oldest.class.slug == :worldon_status
+
+    if s.end_with?("-local", "-local-media", "-federated", "-federated-media")
+      Plugin.call(:worldon_load_more_public_timeline, source, oldest)
+    else
+      Plugin.call(:worldon_load_more_auth_timeline, source, oldest)
+    end
+  end
+
+  on_worldon_load_more_timeline do |source, domain, path, token, params|
+    resp = pm::API.call(:get, domain, path, token, **params)
+    next unless resp
+
+    messages = pm::Status.build(domain, resp.value)
+    Plugin.call(:extract_load_more_messages, source, messages)
+  end
+
+  on_worldon_load_more_public_timeline do |source, oldest|
+    domain, type = pm::Instance.datasource_slug_inv(source)
+    domain = oldest.account.domain
+    status_id = nil
+    if oldest.account.domain == domain
+      status_id = File.basename(oldest.uri.path)
+    else
+      worlds, = Plugin.filtering(:worldon_worlds, nil)
+      world = worlds.select { |w| w.domain == domain }
+      next if world.nil?
+      status_id = pm::API.get_local_status_id(world, oldest)
+    end
+    next if status_id.nil? # oldestがそのドメインでの発言ではなかったFTLは（インスタンスローカルなIDが取得できないため）遡れない
+
+    params = { limit: 40, max_id: status_id }
+    path_base = '/api/v1/timelines/'
+    case type
+    when :federated
+      path = path_base + 'public'
+    when :federated_media
+      path = path_base + 'public'
+      params[:only_media] = 1
+    when :local
+      path = path_base + 'public'
+      params[:local] = 1
+    when :local_media
+      path = path_base + 'public'
+      params[:local] = 1
+      params[:only_media] = 1
+    end
+
+    Plugin.call(:worldon_load_more_timeline, source, domain, path, nil, params)
+  end
+
+  on_worldon_load_more_auth_timeline do |source, oldest|
+    acct, type, n = pm::World.datasource_slug_inv(source)
+    worlds, = Plugin.filtering(:worldon_worlds, nil)
+    world = worlds.select {|w| w.account.acct == acct }.first
+    next if world.nil?
+    status_id = pm::API.get_local_status_id(world, oldest)
+    next if status_id.nil? # oldestがそのドメインでの発言ではなかったFTLは（インスタンスローカルなIDが取得できないため）遡れない
+
+    params = { limit: 40, max_id: status_id }
+    path_base = '/api/v1/timelines/'
+    case type
+    when :list
+      path = path_base + 'home'
+    else
+      path = path_base + type.to_s
+    end
+
+    Plugin.call(:worldon_load_more_timeline, source, world.domain, path, world.access_token, params)
+  end
+
   on_worldon_appear_toots do |statuses|
     Plugin.call(:extract_receive_message, :worldon_appear_toots, statuses)
   end

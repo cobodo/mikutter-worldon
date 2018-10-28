@@ -48,6 +48,21 @@ module Plugin::Worldon
       end
     end
 
+    def self.datasource_slug_inv(sym)
+      s = sym.to_s
+      r = %r!\Aworldon-(.*)-(home|list-([0-9]*)|[^-]*)\z!
+      m = r.match(s)
+      return nil unless m
+      acct = m[1]
+      type = m[2].to_sym
+      n = nil
+      if m[2].start_with?("list-")
+        type = :list
+        n = m[3]
+      end
+      return [acct, type, n]
+    end
+
     def get_lists!
       return @@lists[uri.to_s] if @@lists[uri.to_s]
 
