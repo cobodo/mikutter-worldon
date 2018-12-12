@@ -571,6 +571,32 @@ Plugin.create(:worldon) do
     Plugin.call(:worldon_account_timeline, token.model)
   end
 
+  get_user_tl_by_activity_pub = -> (acct, domain, tl_slug, max_id = nil) do
+    headers = {
+      'Accept' => 'application/activity+json'
+    }
+    params = { page: true }
+    params[:max_id] = max_id if max_id
+    res = pm::API.call(:get, domain, "/users/#{acct}/outbox", nil, {}, headers, **params)
+    next unless res[:orderedItems]
+
+    res[:orderedItems].map do |record|
+      case record[:type]
+      when "Create"
+        # トゥート
+        record[:object][:url]
+      when "Announce"
+        # ブースト
+        pm::Status::TOOT_ACTIVITY_URI_RE.match(record[:atomUri]) do |m|
+          "https://#{m[:domain]}/@#{m[:acct]}/#{m[:status_id]}"
+        end
+      end
+    end.compact.each do |url|
+      status = pm::Status.findbyurl(url) || pm::Status.fetch(url)
+      timeline(tl_slug) << status if status
+    end
+  end
+
   on_worldon_account_timeline do |account|
     acct, domain = account.acct.split('@')
     tl_slug = :"worldon-account-timeline_#{acct}@#{domain}"
@@ -616,26 +642,27 @@ Plugin.create(:worldon) do
         next if domain == world.domain
       end
 
-      headers = {
-        'Accept' => 'application/activity+json'
-      }
-      res = pm::API.call(:get, domain, "/users/#{acct}/outbox?page=true", nil, {}, headers)
-      next unless res[:orderedItems]
+      get_user_tl_by_activity_pub.(acct, domain, tl_slug)
+    end
+  end
 
-      res[:orderedItems].map do |record|
-        case record[:type]
-        when "Create"
-          # トゥート
-          record[:object][:url]
-        when "Announce"
-          # ブースト
-          pm::Status::TOOT_ACTIVITY_URI_RE.match(record[:atomUri]) do |m|
-            "https://#{m[:domain]}/@#{m[:acct]}/#{m[:status_id]}"
-          end
+  on_load_more_timeline do |tl_slug, oldest|
+    %r!\Aworldon-account-timeline_(.+)@(.+)\z!.match(tl_slug.to_s) do |m|
+      full_acct = "#{m[1]}@#{m[2]}"
+      oldest = Enumerator.new do |y|
+        Plugin[:gtk].widgetof(timeline(tl_slug)).each do |mes|
+          y << mes
         end
-      end.compact.each do |url|
-        status = pm::Status.findbyurl(url) || pm::Status.fetch(url)
-        timeline(tl_slug) << status if status
+      end.select do |mes|
+        mes.is_a?(pm::Status) && !mes.pinned? && mes.account.acct == full_acct
+      end.min do |a, b|
+        a.created <=> b.created
+      end
+      puts "oldest=#{oldest}"
+      %r![0-9]+\z!.match(oldest.uri.to_s) do |m2|
+        acct, domain = oldest.account.acct.split('@')
+        oldest_id = m2[0]
+        get_user_tl_by_activity_pub.(acct, domain, tl_slug, oldest_id)
       end
     end
   end
