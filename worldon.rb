@@ -43,28 +43,30 @@ Plugin.create(:worldon) do
     [datasources.merge(dss)]
   end
 
-  on_extract_load_more_datasource do |source, oldest|
+  on_extract_load_more_datasource do |tl_slug, source, oldest|
     notice "worldon: load more #{source} from #{oldest&.uri} #{oldest.inspect}"
     s = source.to_s
     next unless s.start_with?("worldon-") # 「すべてのトゥート」は遡れないことにする
     next unless oldest.class.slug == :worldon_status
 
     if s.end_with?("-local", "-local-media", "-federated", "-federated-media")
-      Plugin.call(:worldon_load_more_public_timeline, source, oldest)
+      Plugin.call(:worldon_load_more_public_timeline, tl_slug, source, oldest)
     else
-      Plugin.call(:worldon_load_more_auth_timeline, source, oldest)
+      Plugin.call(:worldon_load_more_auth_timeline, tl_slug, source, oldest)
     end
   end
 
-  on_worldon_load_more_timeline do |source, domain, path, token, params|
+  on_worldon_load_more_timeline do |tl_slug, source, domain, path, token, params|
+    notice "worldon: worldon_load_more_timeline #{tl_slug} #{source} #{domain} #{path} #{token} #{params}"
     resp = pm::API.call(:get, domain, path, token, **params)
     next unless resp
 
     messages = pm::Status.build(domain, resp.value)
-    Plugin.call(:extract_load_more_messages, source, messages)
+    Plugin.call(:extract_load_more_messages, tl_slug, source, messages)
   end
 
-  on_worldon_load_more_public_timeline do |source, oldest|
+  on_worldon_load_more_public_timeline do |tl_slug, source, oldest|
+    notice "worldon: worldon_load_more_public_timeline #{tl_slug} #{source} #{oldest}"
     domain, type = pm::Instance.datasource_slug_inv(source)
     domain = oldest.account.domain
     status_id = nil
@@ -95,16 +97,17 @@ Plugin.create(:worldon) do
       params[:only_media] = 1
     end
 
-    Plugin.call(:worldon_load_more_timeline, source, domain, path, nil, params)
+    Plugin.call(:worldon_load_more_timeline, tl_slug, source, domain, path, nil, params)
   end
 
-  on_worldon_load_more_auth_timeline do |source, oldest|
+  on_worldon_load_more_auth_timeline do |tl_slug, source, oldest|
+    notice "worldon: worldon_load_more_auth_timeline #{tl_slug} #{source} #{oldest}"
     acct, type, n = pm::World.datasource_slug_inv(source)
     worlds, = Plugin.filtering(:worldon_worlds, nil)
     world = worlds.select {|w| w.account.acct == acct }.first
     next if world.nil?
     status_id = pm::API.get_local_status_id(world, oldest)
-    next if status_id.nil? # oldestがそのドメインでの発言ではなかったFTLは（インスタンスローカルなIDが取得できないため）遡れない
+    next if status_id.nil?
 
     params = { limit: 40, max_id: status_id }
     path_base = '/api/v1/timelines/'
@@ -115,7 +118,7 @@ Plugin.create(:worldon) do
       path = path_base + type.to_s
     end
 
-    Plugin.call(:worldon_load_more_timeline, source, world.domain, path, world.access_token, params)
+    Plugin.call(:worldon_load_more_timeline, tl_slug, source, world.domain, path, world.access_token, params)
   end
 
   on_worldon_appear_toots do |statuses|
