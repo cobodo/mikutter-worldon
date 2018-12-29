@@ -649,19 +649,14 @@ Plugin.create(:worldon) do
   on_load_more_timeline do |tl_slug, oldest|
     %r!\Aworldon-account-timeline_(.+)@(.+)\z!.match(tl_slug.to_s) do |m|
       full_acct = "#{m[1]}@#{m[2]}"
-      oldest = Enumerator.new do |y|
-        Plugin[:gtk].widgetof(timeline(tl_slug)).each do |mes|
-          y << mes
-        end
-      end.select do |mes|
+      oldest = timeline(tl_slug).select do |mes|
         mes.is_a?(pm::Status) && !mes.pinned? && mes.account.acct == full_acct
       end.min do |a, b|
         a.created <=> b.created
       end
-      puts "oldest=#{oldest}"
-      %r![0-9]+\z!.match(oldest.uri.to_s) do |m2|
+      %r!/([0-9]+)\z!.match(oldest.uri.to_s) do |m2|
         acct, domain = oldest.account.acct.split('@')
-        oldest_id = m2[0]
+        oldest_id = m2[1]
         get_user_tl_by_activity_pub.(acct, domain, tl_slug, oldest_id)
       end
     end
