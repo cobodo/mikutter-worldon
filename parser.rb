@@ -11,7 +11,7 @@ module Plugin::Worldon::Parser
     result
   end
 
-  def self.dictate_score(html, mentions: [], emojis: [], media_attachments: [])
+  def self.dictate_score(html, mentions: [], emojis: [], media_attachments: [], poll: nil)
     desc = dehtmlize(html)
 
     score = []
@@ -19,7 +19,7 @@ module Plugin::Worldon::Parser
     # リンク処理
     # TODO: user_detail_viewを作ったらacctをAccount Modelにする
     pos = 0
-    anchor_re = %r|<a href="(?<url>[^"]*)"(?: class="(?<class>[^"]*)")?(?: rel="(?<rel>[^"]*)")?[^>]*>(?<text>[^<]*)</a>|
+    anchor_re = %r|<a(?<attr1>[^>]*) href="(?<url>[^"]*)"(?<attr2>[^>]*)>(?<text>[^<]*)</a>|
     urls = []
     while m = anchor_re.match(desc, pos)
       anchor_begin = m.begin(0)
@@ -45,8 +45,19 @@ module Plugin::Worldon::Parser
             uri: url,
             worldon_link_attr: Hash.new,
           }
-          link_hash[:worldon_link_attr][:class] = m["class"].split(' ') if m["class"]
-          link_hash[:worldon_link_attr][:rel] = m["rel"].split(' ') if m["rel"]
+          attrs = m["attr1"] + m["attr2"]
+          attr_pos = 0
+          attr_re = %r| (?<name>[^=]+)="(?<value>[^"]*)"|
+          while m2 = attr_re.match(attrs, attr_pos)
+            attr_name = m2["name"].to_sym
+            attr_value = m2["value"]
+            if [:class, :rel].include? attr_name
+              link_hash[:worldon_link_attr][attr_name] = attr_value.split(' ')
+            else
+              link_hash[:worldon_link_attr][attr_name] = attr_value
+            end
+            attr_pos = m2.end(0)
+          end
           score << Plugin::Score::HyperLinkNote.new(link_hash)
         end
       end
@@ -73,6 +84,10 @@ module Plugin::Worldon::Parser
           end
           score << Plugin::Score::HyperLinkNote.new(description: description, uri: attachment.url)
         }
+    end
+
+    if poll
+      score << Plugin::Score::TextNote.new(description: "#{poll.options.map{|opt| "\n○ #{opt.title}"}.join('')}\n#{poll.votes_count}票#{poll.expires_at ? " #{poll.expires_at.strftime("%Y-%m-%d %H:%M:%S")}に終了" : ''}")
     end
 
     score = score.flat_map do |note|

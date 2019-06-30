@@ -31,32 +31,30 @@ module Plugin::Worldon
 
   class API
     class << self
-      # httpclient向けにパラメータHashを変換する
-      def build_query(params, headers)
-        # Hashで渡されるクエリパラメータをArray化する。
-        # valueがArrayだった場合はkeyに[]を付加して平たくする。
-        conv = []
-        params.each do |key, val|
-          if val.is_a? Array
-            val.each do |v|
-              elem_key = "#{key.to_s}[]"
-              conv << [elem_key, v]
-            end
-          else
-            conv << [key.to_s, val]
+      def build_query_recurse(params, results = [], files = [], prefix = '', to_multipart = false)
+        if params.is_a? Hash
+          # key-value pairs
+          params.each do |key, val|
+            inner_prefix = "#{prefix}[#{key.to_s}]"
+            results, files, to_multipart = build_query_recurse(val, results, files, inner_prefix, to_multipart)
           end
-        end
-        params = conv
+        elsif params.is_a? Array
+          params.each_index do |i|
+            inner_prefix = "#{prefix}[#{i}]"
+            results, files, to_multipart = build_query_recurse(params[i], results, files, inner_prefix, to_multipart)
+          end
+        elsif params.is_a? Set
+          results, files, to_multipart = build_query_recurse(params.to_a, results, files, prefix, to_multipart)
+        else
+          key = "#{prefix}".sub('[', '').sub(']', '')
+          /^(.*)\[\d+\]$/.match(key) do |m|
+            key = "#{m[1]}[]"
+          end
+          value = params
+          if value.is_a?(Pathname) || value.is_a?(Plugin::Photo::Photo)
+            to_multipart = true
+          end
 
-        # valueの種類に応じてhttpclientに渡すものを変える
-        files = []
-        to_multipart = params.any? {|key, value| value.is_a?(Pathname) || value.is_a?(Plugin::Photo::Photo) }
-
-        if to_multipart
-          headers << ["Content-Type", "multipart/form-data"]
-        end
-
-        params = params.map do |key, value|
           case value
           when Pathname
             # multipart/form-data にするが、POSTリクエストではない可能性がある（PATCH等）ため、ある程度自力でつくる。
@@ -65,7 +63,7 @@ module Plugin::Worldon
             disposition = "form-data; name=\"#{key}\"; filename=\"#{filename}\""
             f = File.open(value.to_s, 'rb')
             files << f
-            {
+            results << {
               "Content-Type" => "application/octet-stream",
               "Content-Disposition" => disposition,
               :content => f,
@@ -73,25 +71,33 @@ module Plugin::Worldon
           when Plugin::Photo::Photo
             filename = Pathname(value.perma_link.path).basename.to_s
             disposition = "form-data; name=\"#{key}\"; filename=\"#{filename}\""
-            {
+            results << {
               "Content-Type" => "application/octet-stream",
               "Content-Disposition" => "form-data; name=\"#{key}\"; filename=\"#{filename}\"",
               :content => StringIO.new(value.blob, 'r'),
             }
           else
             if to_multipart
-              {
+              results << {
                 "Content-Type" => "application/octet-stream",
                 "Content-Disposition" => "form-data; name=\"#{key}\"",
                 :content => value,
               }
             else
-              [key, value]
+              results << [key, value]
             end
           end
         end
+        [results, files, to_multipart]
+      end
 
-        [params, headers, files]
+      # httpclient向けにパラメータHashを変換する
+      def build_query(params, headers)
+        results, files, to_multipart = build_query_recurse(params)
+        if to_multipart
+          headers << ["Content-Type", "multipart/form-data"]
+        end
+        [results, headers, files]
       end
 
       # APIアクセスを行うhttpclientのラッパメソッド
@@ -112,6 +118,7 @@ module Plugin::Worldon
 
           begin
             query, headers, files = build_query(params, headers)
+            PM::Util.ppf query if Mopt.error_level >= 2
 
             body = nil
             if method != :get  # :post, :patch
@@ -135,14 +142,13 @@ module Plugin::Worldon
             parse_Link(resp, hash)
           else
             warn "API.call did'nt return 200 Success"
-            pp [uri.to_s, query, body, headers, resp] if Mopt.error_level >= 2
-            $stdout.flush
+            PM::Util.ppf [uri.to_s, query, body, headers, resp] if Mopt.error_level >= 2
+            Plugin.activity(:system, "APIアクセス失敗", description: "URI: #{uri.to_s}\nparameters: #{params.to_s}\nHTTP status: #{resp.status}\nresponse:\n#{resp.body}")
             nil
           end
         rescue => e
           error "API.call raise exception"
-          pp e if Mopt.error_level >= 1
-          $stdout.flush
+          PM::Util.ppf e if Mopt.error_level >= 1
           nil
         end
       end
@@ -152,14 +158,14 @@ module Plugin::Worldon
         return APIResult.new(hash) if ((!hash.is_a? Array) || link.nil?)
         header =
           link
-            .split(', ')
-            .map do |line|
-              /^<(.*)>; rel="(.*)"$/.match(line) do |m|
-                [$2.to_sym, Diva::URI.new($1)]
-              end
+          .split(', ')
+          .map do |line|
+            /^<(.*)>; rel="(.*)"$/.match(line) do |m|
+              [$2.to_sym, Diva::URI.new($1)]
             end
+          end
             .to_h
-        APIResult.new(hash, header)
+          APIResult.new(hash, header)
       end
 
       def status(domain, id)
@@ -181,7 +187,7 @@ module Plugin::Worldon
       def get_local_status_id(world, status)
         return status.id if world.domain == status.domain
 
-        # 別インスタンス起源のstatusなので検索する
+        # 別サーバー起源のstatusなので検索する
         statuses = status_by_url(world.domain, world.access_token, status.url)
         if statuses.nil? || statuses[0].nil? || statuses[0][:id].nil?
           nil
@@ -193,7 +199,7 @@ module Plugin::Worldon
       def get_local_account_id(world, account)
         return account.id if world.domain == account.domain
 
-        # 別インスタンス起源のaccountなので検索する
+        # 別サーバー起源のaccountなので検索する
         accounts = account_by_url(world.domain, world.access_token, account.url)
         if accounts.nil? || accounts[0].nil? || accounts[0][:id].nil?
           nil

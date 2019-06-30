@@ -176,7 +176,7 @@ Plugin.create(:worldon) do
     end
   end
 
-  # 別プラグインからインスタンスを追加してストリームを開始する例
+  # 別プラグインからサーバーを追加してストリームを開始する例
   # domain = 'friends.nico'
   # instance, = Plugin.filtering(:worldon_add_instance, domain)
   # Plugin.call(:worldon_restart_instance_stream, instance.domain) if instance
@@ -184,7 +184,7 @@ Plugin.create(:worldon) do
     [pm::Instance.add(domain)]
   end
 
-  # インスタンス編集
+  # サーバー編集
   on_worldon_update_instance do |domain|
     Thread.new {
       instance = pm::Instance.load(domain)
@@ -194,7 +194,7 @@ Plugin.create(:worldon) do
     }
   end
 
-  # インスタンス削除
+  # サーバー削除
   on_worldon_delete_instance do |domain|
     Plugin.call(:worldon_remove_instance_stream, domain)
     if UserConfig[:worldon_instances].has_key?(domain)
@@ -249,7 +249,7 @@ Plugin.create(:worldon) do
       if error_msg.is_a? String
         label error_msg
       end
-      input 'インスタンスのドメイン', :domain
+      input 'サーバーのドメイン', :domain
 
       result = await_input
       domain = result[:domain]
@@ -260,7 +260,7 @@ Plugin.create(:worldon) do
         instance, = Plugin.filtering(:worldon_add_instance, domain)
         if instance.nil?
           # 追加失敗
-          error_msg = "#{domain} インスタンスへの接続に失敗しました。やり直してください。"
+          error_msg = "#{domain} サーバーへの接続に失敗しました。やり直してください。"
           next
         end
       end

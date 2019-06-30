@@ -105,7 +105,7 @@ Plugin.create(:worldon) do
     end
   end
 
-  # インスタンスストリームを必要に応じて再起動
+  # サーバーを必要に応じて再起動
   on_worldon_restart_instance_stream do |domain, retrieve = true|
     Thread.new {
       instance = pm::Instance.load(domain)
@@ -224,8 +224,7 @@ Plugin.create(:worldon) do
 
   on_sse_connection_failure do |slug, response|
     error "SSE: connection failure for #{slug.to_s}"
-    pp response if Mopt.error_level >= 1
-    $stdout.flush
+    pm::Util.ppf response if Mopt.error_level >= 1
 
     if (response.status / 100) == 4
       # 4xx系レスポンスはリトライせず終了する
@@ -362,11 +361,15 @@ Plugin.create(:worldon) do
         Plugin.call(:followers_created, world, [user])
       end
 
+    when 'poll'
+      status = pm::Status.build(domain, [payload[:status]]).first
+      return unless status
+      activity(:poll, '投票が終了しました', description: "#{status.uri}")
+
     else
       # 未知の通知
       warn 'unknown notification'
-      pp data if Mopt.error_level >= 2
-      $stdout.flush
+      pm::Util.ppf payload if Mopt.error_level >= 2
     end
   end
 end

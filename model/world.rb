@@ -104,8 +104,17 @@ module Plugin::Worldon
     # opts[:sensitive] True | False NSFWフラグの明示的な指定
     # opts[:spoiler_text] String ContentWarning用のコメント
     # opts[:visibility] String 公開範囲。 "direct", "private", "unlisted", "public" のいずれか。
-    def post(content, **params)
-      params[:status] = content
+    def post(to: nil, message:, **params)
+      params[:status] = message
+      if to
+        status_id = API.get_local_status_id(self, to)
+        if status_id
+          params[:in_reply_to_id] = status_id
+        else
+          warn "返信先Statusが#{world.domain}内に見つかりませんでした：#{status.url}"
+          return nil
+        end
+      end
       API.call(:post, domain, '/api/v1/statuses', access_token, **params)
     end
 
@@ -119,8 +128,7 @@ module Plugin::Worldon
       new_status_hash = PM::API.call(:post, domain, '/api/v1/statuses/' + status_id.to_s + '/reblog', access_token)
       if new_status_hash.nil? || new_status_hash.value.has_key?(:error)
         error 'failed reblog request'
-        pp new_status_hash if Mopt.error_level >= 1
-        $stdout.flush
+        PM::Util.ppf new_status_hash if Mopt.error_level >= 1
         return nil
       end
 
@@ -149,8 +157,7 @@ module Plugin::Worldon
             promise.fail(new_status)
           end
         rescue Exception => e
-          pp e if Mopt.error_level >= 2 # warn
-          $stdout.flush
+          PM::Util.ppf e if Mopt.error_level >= 2 # warn
           promise.fail(e)
         end
       end
@@ -170,8 +177,7 @@ module Plugin::Worldon
           end
           promise.call(accounts.map {|hash| Account.new hash })
         rescue Exception => e
-          pp e if Mopt.error_level >= 2 # warn
-          $stdout.flush
+          PM::Util.ppf e if Mopt.error_level >= 2 # warn
           promise.fail("failed to get #{type}")
         end
       end
@@ -221,8 +227,7 @@ module Plugin::Worldon
           @@blocks[uri.to_s] = accounts.map { |hash| Account.new hash }
           promise.call(@@blocks[uri.to_s])
         rescue Exception => e
-          pp e if Mopt.error_level >= 2 # warn
-          $stdout.flush
+          PM::Util.ppf e if Mopt.error_level >= 2 # warn
           promise.fail('failed to get blocks')
         end
       end
@@ -319,10 +324,38 @@ module Plugin::Worldon
 
     def update_profile(**opts)
       params = {}
+
+      # 以下の2つはupdate_profile*系spellのAPIとしてのパラメータ名とMastodon APIのパラメータ名に違いがある
+
+      # 表示名
       params[:display_name] = opts[:name] if opts[:name]
+      # bio
       params[:note] = opts[:biography] if opts[:biography]
+
+      # フォロー承認制
       params[:locked] = opts[:locked] if !opts[:locked].nil?
+      # botアカウントであることの表明
       params[:bot] = opts[:bot] if !opts[:bot].nil?
+      if [:privacy, :sensitive, :language].any?{|key| opts[:source] && opts[:source][key] }
+        params[:source] = Hash.new
+        # デフォルト公開範囲
+        params[:source][:privacy] = opts[:source_privacy] if opts[:source_privacy]
+        # デフォルトでNSFW
+        params[:source][:sensitive] = opts[:source_sensitive] if opts[:source_sensitive]
+        # 投稿する言語設定（ISO639-1形式（ex: "ja"） or nil（自動検出））
+        params[:source][:language] = opts[:source_language] if opts[:source_language]
+      end
+      # プロフィール補足情報
+      if (1..4).any?{|i| opts[:"field_name#{i}"] && opts[:"field_value#{i}"] }
+        params[:fields_attributes] = Array.new
+        (1..4).each do |i|
+          name = opts[:"field_name#{i}"]
+          next unless name
+          value = opts[:"field_value#{i}"]
+          next unless value
+          params[:fields_attributes] << { name: name, value: value }
+        end
+      end
       ds = []
       if opts[:icon]
         if opts[:icon].is_a?(Plugin::Photo::Photo)

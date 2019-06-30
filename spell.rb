@@ -75,17 +75,35 @@ Plugin.create(:worldon) do
         option :"4direct", "ダイレクト"
       end
 
-      # mikutter-uwm-hommageの設定を勝手に持ってくる
-      dirs = 10.times.map { |i|
-        UserConfig["galary_dir#{i + 1}".to_sym]
-      }.compact.select { |str|
-        !str.empty?
-      }.to_a
+      settings "添付メディア" do
+        # mikutter-uwm-hommageの設定を勝手に持ってくる
+        dirs = 10.times.map { |i|
+          UserConfig["galary_dir#{i + 1}".to_sym]
+        }.compact.select { |str|
+          !str.empty?
+        }.to_a
 
-      fileselect "添付メディア1", :media1, shortcuts: dirs, use_preview: true
-      fileselect "添付メディア2", :media2, shortcuts: dirs, use_preview: true
-      fileselect "添付メディア3", :media3, shortcuts: dirs, use_preview: true
-      fileselect "添付メディア4", :media4, shortcuts: dirs, use_preview: true
+        fileselect "", :media1, shortcuts: dirs, use_preview: true
+        fileselect "", :media2, shortcuts: dirs, use_preview: true
+        fileselect "", :media3, shortcuts: dirs, use_preview: true
+        fileselect "", :media4, shortcuts: dirs, use_preview: true
+      end
+
+      settings "投票を受付ける" do
+        input "1", :poll_options1
+        input "2", :poll_options2
+        input "3", :poll_options3
+        input "4", :poll_options4
+        select "投票受付期間", :poll_expires_in do
+          option :min5, "5分"
+          option :hour, "1時間"
+          option :day, "1日"
+          option :week, "1週間"
+          option :month, "1ヶ月"
+        end
+        boolean "複数選択可にする", :poll_multiple
+        boolean "終了するまで結果を表示しない", :poll_hide_totals
+      end
     end.next do |result|
       # 投稿
       # まず画像をアップロード
@@ -116,6 +134,26 @@ Plugin.create(:worldon) do
       end
       opts[:sensitive] = result[:sensitive]
       opts[:visibility] = select2visibility(result[:visibility])
+
+      if (1..4).any?{|i| result[:"poll_options#{i}"] }
+        opts[:poll] = Hash.new
+        opts[:poll][:expires_in] = case result[:poll_expires_in]
+                                   when :min5
+                                     5 * 60 + 1 # validation error回避のための+1
+                                   when :hour
+                                     60 * 60
+                                   when :day
+                                     24 * 60 * 60
+                                   when :week
+                                     7 * 24 * 60 * 60
+                                   when :month
+                                     (Date.today.next_month - Date.today).to_i * 24 * 60 * 60 - 1 # validation error回避のための-1
+                                   end
+        opts[:poll][:multiple] = !!result[:poll_multiple]
+        opts[:poll][:hide_totals] = !!result[:poll_hide_totals]
+        opts[:poll][:options] = (1..4).map{|i| result[:"poll_options#{i}"] }.compact
+      end
+
       compose(world, reply_to, **opts)
 
       if Gtk::PostBox.list[0] != postbox
@@ -210,7 +248,7 @@ Plugin.create(:worldon) do
     dialog "通報する" do
       error_msg = nil
       while true
-        label "以下のトゥートを #{world.domain} インスタンスの管理者に通報しますか？"
+        label "以下のトゥートを #{world.domain} サーバーの管理者に通報しますか？"
         opt.messages.each { |message|
           link message
         }
@@ -219,7 +257,7 @@ Plugin.create(:worldon) do
 
         result = await_input
         error_msg = "コメントを入力してください。" if (result[:comment].nil? || result[:comment].empty?)
-        error_msg = "コメントが長すぎます（#{result[:comment].size}文字）" if result[:comment].size > 1000
+        error_msg = "コメントが長すぎます（#{result[:comment].to_s.size}文字）" if result[:comment].to_s.size > 1000
         break unless error_msg
       end
 
@@ -323,6 +361,50 @@ Plugin.create(:worldon) do
     end
   end
 
+  command(:worldon_vote, name: '投票する', visible: true, role: :timeline,
+          condition: lambda { |opt|
+            m = opt.messages.first
+            (m.is_a?(Plugin::Worldon::Status) &&
+              m.poll &&
+              [:worldon, :portal].include?(opt.world.class.slug))
+          }) do |opt|
+    m = opt.messages.first
+
+    # poll idはサーバーごとに異なる。worldが所属するサーバーでの値を取得する。
+    statuses = pm::API.status_by_url(opt.world.domain, opt.world.access_token, m.uri)
+    next unless statuses
+    next unless statuses[0]
+    next unless statuses[0][:poll]
+    poll = pm::Poll.new(statuses[0][:poll])
+    next unless poll.expires_at >= Time.now
+
+    dialog "投票" do
+      if poll.multiple
+        multiselect "投票先を選択してください", :vote do
+          poll.options.each_index do |i|
+            vopt = poll.options[i]
+            option(i.to_s.to_sym, vopt.title)
+          end
+        end
+      else
+        select "投票先を選択してください", :vote do
+          poll.options.each_index do |i|
+            vopt = poll.options[i]
+            option(i.to_s.to_sym, vopt.title) { } # ラジオボタン化のために空blockを渡す
+          end
+        end
+      end
+    end.next do |result|
+      vote = result[:vote]
+      unless [Array, Set].include? vote.class
+        vote = [vote]
+      end
+      pm::API.call(:post, opt.world.domain, "/api/v1/polls/#{poll.id}/votes", opt.world.access_token, choices: vote)
+    end.trap do |err|
+      pm::Util.ppf(err)
+    end
+  end
+
 
   # spell系
 
@@ -338,7 +420,7 @@ Plugin.create(:worldon) do
       opts[:sensitive] = false;
     end
 
-    result = world.post(body, opts)
+    result = world.post(message: body, **opts)
     if result.nil?
       warn "投稿に失敗したかもしれません"
       $stdout.flush
@@ -385,25 +467,16 @@ Plugin.create(:worldon) do
       opts[:sensitive] = false;
     end
 
-    status_id = status.id
-    _status_id = pm::API.get_local_status_id(world, status)
-    if _status_id
-      status_id = _status_id
-      opts[:in_reply_to_id] = status_id
-      result = world.post(body, opts)
-      if result.nil?
-        warn "投稿に失敗したかもしれません"
-        $stdout.flush
-        nil
-      else
-        new_status = pm::Status.build(world.domain, [result.value]).first
-        Plugin.call(:posted, world, [new_status]) if new_status
-        Plugin.call(:update, world, [new_status]) if new_status
-        new_status
-      end
-    else
-      warn "返信先Statusが#{world.domain}内に見つかりませんでした：#{status.url}"
+    result = world.post(to: status, message: body, **opts)
+    if result.nil?
+      warn "投稿に失敗したかもしれません"
+      $stdout.flush
       nil
+    else
+      new_status = pm::Status.build(world.domain, [result.value]).first
+      Plugin.call(:posted, world, [new_status]) if new_status
+      Plugin.call(:update, world, [new_status]) if new_status
+      new_status
     end
   end
 
@@ -534,12 +607,25 @@ Plugin.create(:worldon) do
     profiles[:biography] = world.account.source.note
     profiles[:locked] = world.account.locked
     profiles[:bot] = world.account.bot
+    profiles[:source] = {
+      privacy: world.account.source.privacy,
+      sensitive: world.account.source.sensitive,
+      language: world.account.source.language,
+      fields: world.account.source.fields.map{|f| { name: f.name, value: f.value } }
+    }
 
     dialog "プロフィール変更" do
       self[:name] = profiles[:name]
       self[:biography] = profiles[:biography]
       self[:locked] = profiles[:locked]
       self[:bot] = profiles[:bot]
+      self[:source_privacy] = visibility2select(profiles[:source][:privacy])
+      self[:source_sensitive] = profiles[:source][:sensitive]
+      (1..4).each do |i|
+        next unless profiles[:source][:fields][i - 1]
+        self[:"field_name#{i}"] = profiles[:source][:fields][i - 1][:name]
+        self[:"field_value#{i}"] = profiles[:source][:fields][i - 1][:value]
+      end
 
       input '表示名', :name
       multitext 'プロフィール', :biography
@@ -547,6 +633,23 @@ Plugin.create(:worldon) do
       photoselect 'ヘッダー', :header
       boolean '承認制アカウントにする', :locked
       boolean 'これは BOT アカウントです', :bot
+      select "デフォルトの公開範囲", :source_privacy do
+        option :"1public", "公開"
+        option :"2unlisted", "未収載"
+        option :"3private", "非公開"
+        option :"4direct", "ダイレクト"
+      end
+      boolean 'メディアを常に閲覧注意としてマークする', :source_sensitive
+      settings "プロフィール補足情報" do
+        input 'ラベル1', :field_name1
+        input '内容1', :field_value1
+        input 'ラベル2', :field_name2
+        input '内容2', :field_value2
+        input 'ラベル3', :field_name3
+        input '内容3', :field_value3
+        input 'ラベル4', :field_name4
+        input '内容4', :field_value4
+      end
     end.next do |result|
       diff = Hash.new
       diff[:name] = result[:name] if (result[:name] && result[:name].size > 0 && profiles[:name] != result[:name])
@@ -555,6 +658,20 @@ Plugin.create(:worldon) do
       diff[:bot] = result[:bot] if profiles[:bot] != result[:bot]
       diff[:icon] = Pathname(result[:icon]) if result[:icon]
       diff[:header] = Pathname(result[:header]) if result[:header]
+      diff[:source] = Hash.new
+      diff[:source][:privacy] = select2visibility(result[:source_privacy]) if profiles[:source][:privacy] != select2visibility(result[:source_privacy])
+      diff[:source][:sensitive] = result[:source_sensitive] if profiles[:source][:sensitive] != result[:source_sensitive]
+      diff.delete(:source) if diff[:source].empty?
+      if (1..4).any?{|i| result[:"field_name#{i}"] && result[:"field_value#{i}"] }
+        (1..4).each do |i|
+          name = result[:"field_name#{i}"]
+          next unless name
+          value = result[:"field_value#{i}"]
+          next unless value
+          diff[:"field_name#{i}"] = name
+          diff[:"field_value#{i}"] = value
+        end
+      end
       next if diff.empty?
 
       world.update_profile(**diff)
@@ -731,7 +848,7 @@ Plugin.create(:worldon) do
   defspell(:pin_message, :worldon, :worldon_status,
            condition: -> (world, status) {
             world.account.acct == status.account.acct && !status.pinned?
-            # 自分のStatusが（ピン留め状態が不正確になりうるタイミングで）他インスタンスから取得されることはまずないと仮定している
+            # 自分のStatusが（ピン留め状態が不正確になりうるタイミングで）他サーバーから取得されることはまずないと仮定している
            }
           ) do |world, status|
     world.pin(status)
@@ -740,7 +857,7 @@ Plugin.create(:worldon) do
   defspell(:unpin_message, :worldon, :worldon_status,
            condition: -> (world, status) {
             world.account.acct == status.account.acct && status.pinned?
-            # 自分のStatusが（ピン留め状態が不正確になりうるタイミングで）他インスタンスから取得されることはまずないと仮定している
+            # 自分のStatusが（ピン留め状態が不正確になりうるタイミングで）他サーバーから取得されることはまずないと仮定している
            }
           ) do |world, status|
     world.unpin(status)
